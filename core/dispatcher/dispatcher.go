@@ -1,11 +1,14 @@
 package dispatcher
 
 import (
-	"notification/internal/producer"
+	"fmt"
+	"notification/core/history"
+	"notification/core/producer"
+	"notification/pkg/logger"
 )
 
-// OutputChannels is a struct that contains the output channels
-type OutputChannels struct {
+// DispatchMap is a struct that contains the output channels
+type DispatchMap struct {
 	EmailCh   chan producer.Notification
 	SMSCh     chan producer.Notification
 	WebhookCh chan producer.Notification
@@ -13,7 +16,7 @@ type OutputChannels struct {
 }
 
 // Route is a function that routes the notification to the appropriate channel
-func Route(notificationInput <-chan producer.Notification) OutputChannels {
+func Route(notificationInput <-chan producer.Notification, errs chan<- error, historyCh chan<- history.Entry) DispatchMap {
 	emailCh := make(chan producer.Notification)
 	smsCh := make(chan producer.Notification)
 	webhookCh := make(chan producer.Notification)
@@ -24,6 +27,7 @@ func Route(notificationInput <-chan producer.Notification) OutputChannels {
 		defer close(smsCh)
 		defer close(webhookCh)
 		defer close(pushCh)
+
 		for n := range notificationInput {
 			switch n.Type {
 			case "Email":
@@ -34,11 +38,15 @@ func Route(notificationInput <-chan producer.Notification) OutputChannels {
 				webhookCh <- n
 			case "Push":
 				pushCh <- n
+			default:
+				errs <- fmt.Errorf("[Dispatcher Error] Unsupported notification type: %s, ID: %d", n.Type, n.ID)
+				logger.Error(fmt.Sprintf("[Dispatcher Error] Unsupported notification type: %s, ID: %d", n.Type, n.ID))
 			}
 		}
+
 	}()
 
-	return OutputChannels{
+	return DispatchMap{
 		EmailCh:   emailCh,
 		SMSCh:     smsCh,
 		WebhookCh: webhookCh,

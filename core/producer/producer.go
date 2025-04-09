@@ -1,6 +1,9 @@
 package producer
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+)
 
 // Notification is a struct that contains the notification data
 type Notification struct {
@@ -10,23 +13,22 @@ type Notification struct {
 }
 
 // Producer generate notifications and send them through a channel, and return an error channel
-func Producer() (<-chan Notification, <-chan error) {
+func Producer(errs chan<- error) <-chan Notification {
 	out := make(chan Notification)
-	errs := make(chan error, 1)
 
 	go func() {
 		defer close(out)
-		defer close(errs)
 
 		notifications := []Notification{
 			{ID: 1, Type: "Email", Message: "Welcome email"},
 			{ID: 2, Type: "SMS", Message: "Your OTP code"},
-			{ID: 3, Type: "Push", Message: "New push notification"},
+			{ID: 3, Type: "Push", Message: "Push hello"},
 			{ID: 4, Type: "Webhook", Message: "Webhook triggered"},
+			{ID: 5, Type: "Unknown", Message: "Oops!"}, // unknown type
 		}
 
 		if len(notifications) == 0 {
-			errs <- errors.New("no notifications to generate")
+			errs <- fmt.Errorf("Producer error: %w", errors.New("no notifications to generate"))
 			return
 		}
 
@@ -35,5 +37,5 @@ func Producer() (<-chan Notification, <-chan error) {
 		}
 	}()
 
-	return out, errs
+	return out
 }

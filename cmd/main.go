@@ -3,11 +3,12 @@ package main
 import (
 	"context"
 	"fmt"
-	"notification/internal/dispatcher"
-	"notification/internal/limiter"
-	"notification/internal/processor"
-	"notification/internal/producer"
-	"notification/internal/sender"
+	"notification/core/dispatcher"
+	"notification/core/history"
+	"notification/core/limiter"
+	"notification/core/processor"
+	"notification/core/producer"
+	"notification/core/sender"
 	"notification/pkg/logger"
 	"sync"
 	"time"
@@ -21,85 +22,103 @@ func main() {
 
 	var wg sync.WaitGroup
 
-	// Step 1: Create notifications and start a notification producer channel
-	notificationsChannel, errsChannel := producer.Producer()
+	// Step 0: Create shared channels
+	errsChannel := make(chan error)
+	historyCh := make(chan history.Entry)
+	historyStore := history.NewStore()
 
-	// Step 2: Handle errors using different goroutine
+	// Step 0.1: Start history saving goroutine
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		defer logger.Info("History goroutine stopped")
+		for entry := range historyCh {
+			historyStore.Add(entry)
+		}
+	}()
+
+	// Step 1: Producer
+	notificationsChannel := producer.Producer(errsChannel)
+
+	// Step 2: Error handler
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		defer logger.Info("Error handler goroutine stopped")
-		for err := range errsChannel {
-			if err != nil {
-				fmt.Println("[ERROR] Producer:", err)
-			}
-		}
+		printErrorResults("Error", errsChannel)
 	}()
 
-	// Step 3: Processor
-	processedCh := processor.Processor(notificationsChannel)
+	// Step 3~7: Pipeline
+	processedCh := processor.Processor(notificationsChannel, errsChannel, historyCh)
+	limitedCh := limiter.RateLimiter(processedCh, 500*time.Millisecond, errsChannel, historyCh)
+	dispatchMap := dispatcher.Route(limitedCh, errsChannel, historyCh)
 
-	// Step 4: Rate Limiter
-	limitedCh := limiter.RateLimiter(processedCh, 500*time.Millisecond) // 500ms one notification
+	emailResultCh := sender.SendEmail(dispatchMap.EmailCh, errsChannel, historyCh)
+	smsResultCh := sender.SendSMS(dispatchMap.SMSCh, errsChannel, historyCh)
+	webhookResultCh := sender.SendWebhook(dispatchMap.WebhookCh, errsChannel, historyCh)
+	pushResultCh := sender.SendPush(dispatchMap.PushCh, errsChannel, historyCh)
 
-	// Step 5: Dispatcher
-	dispatchMap := dispatcher.Route(limitedCh)
-
-	// Step 6: Sender (returns result channels)
-	emailResultCh := sender.SendEmail(dispatchMap.EmailCh)
-	smsResultCh := sender.SendSMS(dispatchMap.SMSCh)
-	webhookResultCh := sender.SendWebhook(dispatchMap.WebhookCh)
-	pushResultCh := sender.SendPush(dispatchMap.PushCh)
-
-	// Step 7: Combine and print results
+	// Step 8: Print results
 	wg.Add(4)
 	go func() {
 		defer wg.Done()
-		defer logger.Info("Email result printer stopped")
 		printResults("Email", emailResultCh)
 	}()
 	go func() {
 		defer wg.Done()
-		defer logger.Info("SMS result printer stopped")
 		printResults("SMS", smsResultCh)
 	}()
 	go func() {
 		defer wg.Done()
-		defer logger.Info("Webhook result printer stopped")
 		printResults("Webhook", webhookResultCh)
 	}()
 	go func() {
 		defer wg.Done()
-		defer logger.Info("Push result printer stopped")
 		printResults("Push", pushResultCh)
 	}()
 
-	// Create a channel to signal when all notifications are processed
+	// Step 9: Wait
 	done := make(chan struct{})
 	go func() {
 		wg.Wait()
 		close(done)
 	}()
 
-	// Wait for all goroutines to complete or context cancellation
 	select {
 	case <-ctx.Done():
 		logger.Info("Context cancelled, shutting down...")
 	case <-done:
 		logger.Info("All notifications processed, shutting down...")
-	case <-time.After(10 * time.Second): // 增加等待時間到 10 秒
+	case <-time.After(10 * time.Second):
 		logger.Info("Timeout reached, shutting down...")
 		cancel()
 	}
 
-	// Wait for all goroutines to complete
+	// Step 10: Close shared channels
+	close(errsChannel)
+	close(historyCh)
+
+	// Export history to a file
+	err := history.ExportToFile("history.json")
+	if err != nil {
+		logger.Error(fmt.Sprintf("Error exporting history to file: %v", err))
+	} else {
+		logger.Info("History successfully exported to history.json")
+	}
+
 	wg.Wait()
 	logger.Info("Notification system stopped.")
 }
 
-// Utility function to print result messages
+// Utility function to print result or error messages
 func printResults(tag string, ch <-chan string) {
 	for msg := range ch {
 		fmt.Printf("[%s Result] %s\n", tag, msg)
+	}
+}
+
+func printErrorResults(tag string, ch <-chan error) {
+	for err := range ch {
+		fmt.Printf("[%s Error] %s\n", tag, err)
 	}
 }
